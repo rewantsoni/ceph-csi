@@ -352,11 +352,11 @@ func (status GlobalMirrorStatus) GetAllSitesStatus() []types.SiteStatus {
 
 // RemoteStatus returns one SiteMirrorImageStatus item from the SiteStatuses
 // slice that corresponds to the remote site's status. If the remote status
-// is not found than the error ErrNotExist will be returned.
+// is not found than the error ErrStatusNotFound will be returned.
 func (status GlobalMirrorStatus) GetRemoteSiteStatus(ctx context.Context) (types.SiteStatus, error) {
 	var (
 		ss  librbd.SiteMirrorImageStatus
-		err error = librbd.ErrNotExist
+		err error = rbderrors.ErrStatusNotFound
 	)
 
 	for i := range status.SiteStatuses {

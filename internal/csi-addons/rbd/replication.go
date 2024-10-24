@@ -815,6 +815,7 @@ func getGRPCError(err error) error {
 		rbderrors.ErrAborted:            codes.Aborted,
 		rbderrors.ErrFailedPrecondition: codes.FailedPrecondition,
 		rbderrors.ErrUnavailable:        codes.Unavailable,
+		rbderrors.ErrGroupUnavailable:   codes.Unavailable,
 	}
 
 	for e, code := range errorStatusMap {
@@ -906,7 +907,7 @@ func (rs *ReplicationServer) GetVolumeReplicationInfo(ctx context.Context,
 	if err != nil {
 		log.ErrorLog(ctx, "failed to get remote site status for mirror %q: %v", mirror, err)
 
-		if errors.Is(err, librbd.ErrNotExist) {
+		if errors.Is(err, rbderrors.ErrStatusNotFound) {
 			return nil, status.Errorf(codes.NotFound, "failed to get remote status: %v", err)
 		}
 

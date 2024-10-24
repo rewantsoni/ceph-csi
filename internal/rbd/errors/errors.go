@@ -70,6 +70,11 @@ var (
 	// ErrMounterUnknown is returned when the mounter type for a volume is not stored in metadata.
 	// This can happen for volumes created before mounter metadata tracking was added.
 	ErrMounterUnknown = errors.New("mounter type unknown")
+	// ErrGroupUnavailable is returned when the group needs to be recreated
+	// locally and may be corrected by retrying with a backoff.
+	ErrGroupUnavailable = errors.New("group needs to be recreated")
+	// ErrStatusNotFound is returned when the image/group mirror status is not found.
+	ErrStatusNotFound = errors.New("rbd image/group status not found")
 )
 
 // ErrorCode is an interface that defines a method to return an error code.
