@@ -409,3 +409,9 @@ func (vg *volumeGroup) CreateSnapshots(
 
 	return snapshots, nil
 }
+
+func (vg *volumeGroup) ToMirror() (types.Mirror, error) {
+	vgm := volumeGroupMirror(*vg)
+
+	return &vgm, nil
+}

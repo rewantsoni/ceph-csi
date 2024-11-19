@@ -102,11 +102,7 @@ func (vs *VolumeGroupServer) CreateVolumeGroup(
 
 	// resolve all volumes
 	volumes := make([]types.Volume, 0)
-	defer func() {
-		for _, vol := range volumes {
-			vol.Destroy(ctx)
-		}
-	}()
+	defer destoryVolumes(ctx, volumes)
 	for i, id := range req.GetVolumeIds() {
 		vol, err := mgr.GetVolumeByID(ctx, id)
 		if err != nil {
@@ -445,11 +441,7 @@ func (vs *VolumeGroupServer) ModifyVolumeGroupMembership(
 
 	// resolve all volumes
 	volumes := make([]types.Volume, len(toAdd))
-	defer func() {
-		for _, vol := range volumes {
-			vol.Destroy(ctx)
-		}
-	}()
+	defer destoryVolumes(ctx, volumes)
 	for i, id := range toAdd {
 		var vol types.Volume
 		vol, err = mgr.GetVolumeByID(ctx, id)
