@@ -23,6 +23,7 @@ import (
 	"maps"
 	"slices"
 
+	"github.com/csi-addons/spec/lib/go/replication"
 	"github.com/csi-addons/spec/lib/go/volumegroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -295,23 +296,43 @@ func (vs *VolumeGroupServer) DeleteVolumeGroup(
 
 	log.DebugLog(ctx, "VolumeGroup %q has been found", req.GetVolumeGroupId())
 
-	// verify that the volume group is empty
-	volumes, err := vg.ListVolumes(ctx)
+	volumes, mirror, err := mgr.GetMirrorSource(ctx, req.GetVolumeGroupId(), &replication.ReplicationSource{
+		Type: &replication.ReplicationSource_Volumegroup{
+			Volumegroup: &replication.ReplicationSource_VolumeGroupSource{
+				VolumeGroupId: req.GetVolumeGroupId(),
+			},
+		},
+	})
+	defer destoryVolumes(ctx, volumes)
+
 	if err != nil {
-		return nil, status.Errorf(
-			codes.NotFound,
-			"could not list volumes for voluem group %q: %s",
-			req.GetVolumeGroupId(),
-			err.Error())
+		return nil, getGRPCError(err)
 	}
 
-	log.DebugLog(ctx, "VolumeGroup %q contains %d volumes", req.GetVolumeGroupId(), len(volumes))
+	vgrMirrorInfo, err := mirror.GetMirroringInfo(ctx)
+	if err != nil {
+		log.ErrorLog(ctx, err.Error())
 
-	if len(volumes) != 0 {
-		return nil, status.Errorf(
-			codes.FailedPrecondition,
-			"rejecting to delete non-empty volume group %q",
-			req.GetVolumeGroupId())
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	// verify that the volume group is empty, if the group is primary
+	if vgrMirrorInfo.IsPrimary() {
+		volumes, err = vg.ListVolumes(ctx)
+		if err != nil {
+			return nil, status.Errorf(
+				codes.NotFound,
+				"could not list volumes for volume group %q: %s",
+				req.GetVolumeGroupId(),
+				err.Error())
+		}
+		log.DebugLog(ctx, "VolumeGroup %q contains %d volumes", req.GetVolumeGroupId(), len(volumes))
+		if len(volumes) != 0 {
+			return nil, status.Errorf(
+				codes.FailedPrecondition,
+				"rejecting to delete non-empty volume group %q",
+				req.GetVolumeGroupId())
+		}
 	}
 
 	// delete the volume group
@@ -384,6 +405,31 @@ func (vs *VolumeGroupServer) ModifyVolumeGroupMembership(
 	}
 	defer vg.Destroy(ctx)
 
+	volumes, mirror, err := mgr.GetMirrorSource(ctx, req.GetVolumeGroupId(), &replication.ReplicationSource{
+		Type: &replication.ReplicationSource_Volumegroup{
+			Volumegroup: &replication.ReplicationSource_VolumeGroupSource{
+				VolumeGroupId: req.GetVolumeGroupId(),
+			},
+		},
+	})
+	defer destoryVolumes(ctx, volumes)
+	if err != nil {
+		return nil, getGRPCError(err)
+	}
+
+	vgrMirrorInfo, err := mirror.GetMirroringInfo(ctx)
+	if err != nil {
+		log.ErrorLog(ctx, err.Error())
+
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	// Skip modification of group if it's secondary
+	if !vgrMirrorInfo.IsPrimary() {
+		log.DebugLog(ctx, "skipping modification of group, as it is in secondary state")
+		return &volumegroup.ModifyVolumeGroupMembershipResponse{}, nil
+	}
+
 	beforeVolumes, err := vg.ListVolumes(ctx)
 	if err != nil {
 		return nil, status.Errorf(
@@ -440,8 +486,8 @@ func (vs *VolumeGroupServer) ModifyVolumeGroupMembership(
 	}
 
 	// resolve all volumes
-	volumes := make([]types.Volume, len(toAdd))
-	defer destoryVolumes(ctx, volumes)
+	newVolumes := make([]types.Volume, len(toAdd))
+	defer destoryVolumes(ctx, newVolumes)
 	for i, id := range toAdd {
 		var vol types.Volume
 		vol, err = mgr.GetVolumeByID(ctx, id)
@@ -452,7 +498,7 @@ func (vs *VolumeGroupServer) ModifyVolumeGroupMembership(
 				id,
 				err)
 		}
-		volumes[i] = vol
+		newVolumes[i] = vol
 	}
 
 	// extract the flatten mode
@@ -462,7 +508,7 @@ func (vs *VolumeGroupServer) ModifyVolumeGroupMembership(
 	}
 	// Flatten the image if the flatten mode is set to FlattenModeForce
 	// before adding it to the volume group.
-	for _, vol := range volumes {
+	for _, vol := range newVolumes {
 		err = vol.HandleParentImageExistence(ctx, flattenMode)
 		if err != nil {
 			err = fmt.Errorf("failed to handle parent image for volume group %q: %w", vg, err)
@@ -472,7 +518,7 @@ func (vs *VolumeGroupServer) ModifyVolumeGroupMembership(
 	}
 
 	// add the new volumes to the group
-	for _, vol := range volumes {
+	for _, vol := range newVolumes {
 		err = vg.AddVolume(ctx, vol)
 		if err != nil {
 			return nil, status.Errorf(

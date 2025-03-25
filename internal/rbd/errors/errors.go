@@ -75,6 +75,8 @@ var (
 	ErrGroupUnavailable = errors.New("group needs to be recreated")
 	// ErrStatusNotFound is returned when the image/group mirror status is not found.
 	ErrStatusNotFound = errors.New("rbd image/group status not found")
+	// ErrGroupInvalidArgument is returned when an invalid operation is attempted on the group.
+	ErrGroupInvalidArgument = errors.New("rbd group invalid arguments provided")
 )
 
 // ErrorCode is an interface that defines a method to return an error code.

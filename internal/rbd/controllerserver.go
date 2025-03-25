@@ -33,6 +33,7 @@ import (
 
 	csicommon "github.com/ceph/ceph-csi/internal/csi-common"
 	rbderrors "github.com/ceph/ceph-csi/internal/rbd/errors"
+	"github.com/ceph/ceph-csi/internal/rbd/types"
 	"github.com/ceph/ceph-csi/internal/util"
 	"github.com/ceph/ceph-csi/internal/util/k8s"
 	"github.com/ceph/ceph-csi/internal/util/log"
@@ -1001,6 +1002,9 @@ func (cs *ControllerServer) DeleteVolume(
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
+	mgr := NewManager(cs.Driver.GetInstanceID(), nil, req.GetSecrets())
+	defer mgr.Destroy(ctx)
+
 	cr, err := util.NewUserCredentialsWithMigration(req.GetSecrets())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -1055,12 +1059,12 @@ func (cs *ControllerServer) DeleteVolume(
 	}
 	defer cs.VolumeLocks.Release(rbdVol.RequestName)
 
-	return cleanupRBDImage(ctx, rbdVol, cr)
+	return cleanupRBDImage(ctx, rbdVol, cr, mgr)
 }
 
 // cleanupRBDImage removes the rbd image and OMAP metadata associated with it.
-func cleanupRBDImage(ctx context.Context,
-	rbdVol *rbdVolume, cr *util.Credentials,
+func cleanupRBDImage(ctx context.Context, rbdVol *rbdVolume,
+	cr *util.Credentials, mgr types.Manager,
 ) (*csi.DeleteVolumeResponse, error) {
 	rm, err := rbdVol.ToMirror()
 	if err != nil {
@@ -1125,6 +1129,21 @@ func cleanupRBDImage(ctx context.Context,
 		log.ErrorLog(ctx, "rbd %s is still being used", rbdVol)
 
 		return nil, status.Errorf(codes.Aborted, "rbd %s is still being used", rbdVol.RbdImageName)
+	}
+
+	// check if image is part of a group
+	groupId, err := rbdVol.GetVolumeGroupID(ctx, mgr)
+	if err != nil && !errors.Is(err, rbderrors.ErrGroupNotFound) {
+		log.ErrorLog(ctx, err.Error())
+
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	if groupId != "" {
+		err = fmt.Errorf("image %q is a part of volume group %q", rbdVol, groupId)
+		log.ErrorLog(ctx, err.Error())
+
+		return nil, status.Error(codes.Aborted, err.Error())
 	}
 
 	// delete the temporary rbd image created as part of volume clone during

@@ -25,6 +25,8 @@ import (
 	librbd "github.com/ceph/go-ceph/rbd"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/csi-addons/spec/lib/go/volumegroup"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	rbderrors "github.com/ceph/ceph-csi/internal/rbd/errors"
 	"github.com/ceph/ceph-csi/internal/rbd/types"
@@ -187,6 +189,56 @@ func (vg *volumeGroup) Delete(ctx context.Context) error {
 
 	ioctx, err := vg.GetIOContext(ctx)
 	if err != nil {
+		return err
+	}
+
+	mirror, err := vg.ToMirror()
+	if err != nil {
+		return fmt.Errorf("failed to convert volume group %q to mirror: %w", vg, err)
+	}
+
+	vgrMirrorInfo, err := mirror.GetMirroringInfo(ctx)
+	if err != nil {
+		log.ErrorLog(ctx, err.Error())
+
+		return err
+	}
+
+	// Cleanup only omap data if the following condition is met
+	// Mirroring is enabled on the group
+	// Local group is secondary
+	// Local group is in up+replaying state
+	log.DebugLog(ctx, "volume group %v is in %v state and is primary %v", vg,
+		vgrMirrorInfo.GetState(), vgrMirrorInfo.IsPrimary())
+	if !vgrMirrorInfo.IsPrimary() && vgrMirrorInfo.GetState() == librbd.MirrorGroupEnabled.String() {
+		// If the group is in a secondary state and its up+replaying means its
+		// an healthy secondary and the group is primary somewhere in the
+		// remote cluster and the local group is getting replayed. Delete the
+		// OMAP data generated as we cannot delete the secondary group. When
+		// the group on the primary cluster gets deleted/mirroring disabled,
+		// the group on all the remote (secondary) clusters will get
+		// auto-deleted. This helps in garbage collecting the OMAP, VR, VGR,
+		// VGRC, PVC and PV objects after failback operation.
+		sts, rErr := mirror.GetGlobalMirroringStatus(ctx)
+		if rErr != nil {
+			return status.Error(codes.Internal, rErr.Error())
+		}
+		localStatus, rErr := sts.GetLocalSiteStatus()
+		if rErr != nil {
+			log.ErrorLog(ctx, "failed to get local status for volume group%s: %w", name, rErr)
+
+			return status.Error(codes.Internal, rErr.Error())
+		}
+		log.DebugLog(ctx, "local status is %v and local state is %v", localStatus.IsUP(), localStatus.GetState())
+		if localStatus.IsUP() && localStatus.GetState() == librbd.MirrorGroupStatusStateReplaying.String() {
+			return vg.commonVolumeGroup.Delete(ctx)
+		}
+		err = fmt.Errorf("%w: secondary group status is up=%t and state=%s",
+			rbderrors.ErrGroupInvalidArgument,
+			localStatus.IsUP(),
+			localStatus.GetState())
+		log.ErrorLog(ctx, err.Error())
+
 		return err
 	}
 
