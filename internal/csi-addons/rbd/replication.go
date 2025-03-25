@@ -312,23 +312,16 @@ func (rs *ReplicationServer) EnableVolumeReplication(ctx context.Context,
 				err = rbdVol.HandleParentImageExistence(ctx, flattenMode)
 				if err != nil {
 					err = fmt.Errorf("failed to handle parent image for volume group %q: %w", mirror, err)
+
 					return nil, getGRPCError(err)
 				}
-				err = mirror.EnableMirroring(ctx, mirroringMode)
-				if err != nil {
-					log.ErrorLog(ctx, err.Error())
-
-					return nil, status.Error(codes.Internal, err.Error())
-				}
 			}
-		} else {
-			// enable mirroring for an empty volume group
-			err = mirror.EnableMirroring(ctx, mirroringMode)
-			if err != nil {
-				log.ErrorLog(ctx, err.Error())
+		}
+		err = mirror.EnableMirroring(ctx, mirroringMode)
+		if err != nil {
+			log.ErrorLog(ctx, err.Error())
 
-				return nil, status.Error(codes.Internal, err.Error())
-			}
+			return nil, status.Error(codes.Internal, err.Error())
 		}
 	}
 
@@ -453,6 +446,22 @@ func (rs *ReplicationServer) PromoteVolume(ctx context.Context,
 			info.GetState())
 	}
 
+	globalMirroringStatus, err := mirror.GetGlobalMirroringStatus(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	localStatus, err := globalMirroringStatus.GetLocalSiteStatus()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	if !info.IsPrimary() && localStatus.IsUP() &&
+		(localStatus.GetState() != librbd.MirrorGroupStatusStateUnknown.String() &&
+			localStatus.GetState() != librbd.MirrorGroupStatusStateReplaying.String()) {
+		return nil, status.Errorf(codes.Internal, "group %s is not in secondary state before promotion", reqID)
+	}
+
 	// promote secondary to primary
 	if !info.IsPrimary() {
 		err = mirror.Promote(ctx, req.GetForce())
@@ -540,8 +549,18 @@ func (rs *ReplicationServer) DemoteVolume(ctx context.Context,
 			info.GetState())
 	}
 
+	globalMirroringStatus, err := mirror.GetGlobalMirroringStatus(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	localStatus, err := globalMirroringStatus.GetLocalSiteStatus()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
 	// demote image to secondary
-	if info.IsPrimary() {
+	if info.IsPrimary() && localStatus.IsUP() && localStatus.GetState() == librbd.MirrorGroupStatusStateStopped.String() {
 		for _, vol := range volumes {
 			// If volume is demoted first, ControllerUnpublishVolume will fail to remove metadata
 			// since the image will be Read-only.
@@ -575,6 +594,17 @@ func (rs *ReplicationServer) DemoteVolume(ctx context.Context,
 
 			return nil, status.Error(codes.Internal, err.Error())
 		}
+	}
+
+	info, err = mirror.GetMirroringInfo(ctx)
+	if err != nil {
+		log.ErrorLog(ctx, err.Error())
+
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	if info.IsPrimary() {
+		return nil, status.Error(codes.Internal, "volume/volume group has not been demoted, yet!")
 	}
 
 	return &replication.DemoteVolumeResponse{}, nil
