@@ -1,3 +1,5 @@
+//go:build ceph_preview
+
 package cephfs
 
 /*

@@ -45,6 +45,8 @@ require (
 	k8s.io/utils v0.0.0-20260210185600-b8788abfbbc2
 )
 
+replace github.com/ceph/go-ceph => github.com/red-hat-storage/go-ceph v0.32.1-0.20260325063538-172017ca4866
+
 require (
 	// sigs.k8s.io/controller-runtime wants this version, it gets replaced below
 	k8s.io/client-go v12.0.0+incompatible

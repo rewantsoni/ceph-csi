@@ -1,4 +1,4 @@
-//go:build !octopus
+//go:build !octopus && ceph_preview
 
 package osd
 
