@@ -24,6 +24,7 @@ import (
 	"slices"
 
 	librbd "github.com/ceph/go-ceph/rbd"
+	"github.com/ceph/go-ceph/rbd/admin"
 	"github.com/csi-addons/spec/lib/go/replication"
 	"github.com/csi-addons/spec/lib/go/volumegroup"
 	"google.golang.org/grpc"
@@ -611,6 +612,22 @@ func (vs *VolumeGroupServer) ModifyVolumeGroupMembership(
 		log.ErrorLog(ctx, "failed to enable mirroring after modifying volume group")
 
 		return nil, getGRPCError(err)
+	}
+
+	// Need to add scheduling again since disabling mirroring may have
+	// removed snapshot schedule too.
+	interval, startTime := getSchedulingDetails(req.GetParameters())
+	if interval != admin.NoInterval {
+		err = mirror.AddSnapshotScheduling(interval, startTime)
+		if err != nil {
+			return nil, err
+		}
+		log.DebugLog(
+			ctx,
+			"Added scheduling at interval %s, start time %s for group %s",
+			interval,
+			startTime,
+			vg)
 	}
 
 	csiVG, err := vg.ToCSI(ctx)

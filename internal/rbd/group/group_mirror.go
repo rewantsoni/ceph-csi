@@ -252,12 +252,12 @@ func (vgm *volumeGroupMirror) GetGlobalMirroringStatus(ctx context.Context) (typ
 }
 
 func (vgm *volumeGroupMirror) AddSnapshotScheduling(interval admin.Interval, startTime admin.StartTime) error {
-	ls := admin.NewLevelSpec(vgm.pool, vgm.namespace, "")
+	ls := admin.NewGroupLevelSpec(vgm.pool, vgm.namespace, vgm.name)
 	ra, err := vgm.conn.GetRBDAdmin()
 	if err != nil {
 		return err
 	}
-	adminConn := ra.MirrorSnashotSchedule()
+	adminConn := ra.GroupSnapshotSchedule()
 	err = adminConn.Add(ls, interval, startTime)
 	if err != nil {
 		return err
