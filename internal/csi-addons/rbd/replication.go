@@ -502,6 +502,8 @@ func (rs *ReplicationServer) PromoteVolume(ctx context.Context,
 // volumeID, If the image is present, mirroring is enabled and the
 // image is in promoted state it will demote the volume as secondary.
 // If the image is already secondary it will return success.
+//
+//nolint:gocyclo,cyclop // TODO: reduce complexity
 func (rs *ReplicationServer) DemoteVolume(ctx context.Context,
 	req *replication.DemoteVolumeRequest,
 ) (*replication.DemoteVolumeResponse, error) {
