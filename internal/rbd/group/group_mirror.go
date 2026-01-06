@@ -30,7 +30,6 @@ import (
 
 	rbderrors "github.com/ceph/ceph-csi/internal/rbd/errors"
 	"github.com/ceph/ceph-csi/internal/rbd/types"
-	"github.com/ceph/ceph-csi/internal/util"
 	"github.com/ceph/ceph-csi/internal/util/log"
 )
 
@@ -94,36 +93,7 @@ func (vgm *volumeGroupMirror) Promote(ctx context.Context, force bool) error {
 		return fmt.Errorf("failed to promote volume group %q: %w", vgm, err)
 	}
 
-	log.DebugLog(ctx, "volume group %q has been promoted", vgm)
-
-	return nil
-}
-
-func (vgm *volumeGroupMirror) ForcePromote(ctx context.Context, cr *util.Credentials) error {
-	promoteArgs := []string{
-		"mirror", "group", "promote",
-		vgm.String(),
-		"--force",
-		"--id", cr.ID,
-		"-m", vgm.monitors,
-		"--keyfile=" + cr.KeyFile,
-	}
-	_, stderr, err := util.ExecCommandWithTimeout(
-		ctx,
-		// 2 minutes timeout as the Replication RPC timeout is 2.5 minutes.
-		2*time.Minute,
-		"rbd",
-		promoteArgs...,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to promote group %q with error: %w", vgm, err)
-	}
-
-	if stderr != "" {
-		return fmt.Errorf("failed to promote group %q with stderror: %s", vgm, stderr)
-	}
-
-	log.DebugLog(ctx, "volume group %q has been force promoted", vgm)
+	log.DebugLog(ctx, "volume group %q has been promoted with force=%v", vgm, force)
 
 	return nil
 }
