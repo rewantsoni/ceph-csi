@@ -452,8 +452,8 @@ func (vs *VolumeGroupServer) ModifyVolumeGroupMembership(
 			return &volumegroup.ModifyVolumeGroupMembershipResponse{}, nil
 		}
 
-		if vgrMirrorInfo.IsPrimary() && localStatus.IsUP() &&
-			localStatus.GetState() != librbd.MirrorGroupStatusStateStopped.String() {
+		if vgrMirrorInfo.IsPrimary() && (!localStatus.IsUP() ||
+			localStatus.GetState() != librbd.MirrorGroupStatusStateStopped.String()) {
 			log.ErrorLog(ctx, "can't modify group, as it is in promoting state")
 
 			return nil, status.Errorf(
@@ -491,6 +491,7 @@ func (vs *VolumeGroupServer) ModifyVolumeGroupMembership(
 	}
 
 	beforeVolumes, err := vg.ListVolumes(ctx)
+	defer destoryVolumes(ctx, beforeVolumes)
 	if err != nil {
 		return nil, status.Errorf(
 			codes.Internal,
@@ -499,19 +500,43 @@ func (vs *VolumeGroupServer) ModifyVolumeGroupMembership(
 			err)
 	}
 
+	beforeVolumesInfo, err := vg.ListVolumesInGroup(ctx)
+	if err != nil {
+		return nil, status.Errorf(
+			codes.Internal,
+			"failed to list volumes in volume group %q: %v",
+			vg,
+			err)
+	}
+
 	// beforeIDs contains the csiID as key, volume as value
 	beforeIDs := make(map[string]types.Volume, len(beforeVolumes))
+	// Only consider volume Ids that are present in the rbd group in the ceph backend.
 	for _, vol := range beforeVolumes {
-		id, idErr := vol.GetID(ctx)
-		if idErr != nil {
+		name, nameErr := vol.GetName(ctx)
+		if nameErr != nil {
 			return nil, status.Errorf(
 				codes.InvalidArgument,
-				"failed to get the CSI ID of volume %q: %v",
+				"failed to get the CSI Name of volume %q: %v",
 				vol,
-				idErr)
+				nameErr)
 		}
+		// Check if the volume is present in RBD Group in the ceph backend
+		found := slices.IndexFunc(beforeVolumesInfo, func(volInfo types.GroupImageInfo) bool {
+			return volInfo.GetName() == name
+		})
+		if found != -1 {
+			id, idErr := vol.GetID(ctx)
+			if idErr != nil {
+				return nil, status.Errorf(
+					codes.InvalidArgument,
+					"failed to get the CSI ID of volume %q: %v",
+					vol,
+					idErr)
+			}
 
-		beforeIDs[id] = vol
+			beforeIDs[id] = vol
+		}
 	}
 
 	// check which volumes should not be part of the group
@@ -533,6 +558,8 @@ func (vs *VolumeGroupServer) ModifyVolumeGroupMembership(
 
 	// Skip modification if there is no change to volumes list that are part of group
 	if len(toRemove) == 0 && len(toAdd) == 0 {
+		log.DebugLog(ctx, "skipping modification of group, as there are no changes to volumes in the group")
+
 		return &volumegroup.ModifyVolumeGroupMembershipResponse{}, nil
 	}
 

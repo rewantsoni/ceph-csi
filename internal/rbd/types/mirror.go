@@ -111,3 +111,10 @@ type SyncInfo interface {
 	// syncing.
 	IsSyncing() bool
 }
+
+type GroupImageInfo interface {
+	// GetName returns the image name
+	GetName() string
+	// GetPoolID returns the poolID of the image
+	GetPoolID() int64
+}

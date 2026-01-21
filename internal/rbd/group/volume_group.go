@@ -377,6 +377,43 @@ func (vg *volumeGroup) ListVolumes(ctx context.Context) ([]types.Volume, error) 
 	return vg.volumes, nil
 }
 
+// groupImageInfo is a wrapper around librbd.GroupImageInfo that contains the
+// info of all the images part of the group.
+type groupImageInfo librbd.GroupImageInfo
+
+func (info groupImageInfo) GetName() string {
+	return info.Name
+}
+
+func (info groupImageInfo) GetPoolID() int64 {
+	return info.PoolID
+}
+
+func (vg *volumeGroup) ListVolumesInGroup(ctx context.Context) ([]types.GroupImageInfo, error) {
+	ioctx, err := vg.GetIOContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("could not get iocontext for volume group %q: %w", vg, err)
+	}
+
+	name, err := vg.GetName(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("could not get name for volume group %q: %w", vg, err)
+	}
+
+	imageList, err := librbd.GroupImageList(ioctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list images in volume group %q: %w", vg, err)
+	}
+
+	imageInfoList := make([]types.GroupImageInfo, len(imageList))
+
+	for i := range imageList {
+		imageInfoList[i] = groupImageInfo(imageList[i])
+	}
+
+	return imageInfoList, nil
+}
+
 // CreateSnapshots makes consistent snapshots of all the volumes in the volume group.
 func (vg *volumeGroup) CreateSnapshots(
 	ctx context.Context,

@@ -48,6 +48,8 @@ type journalledObject interface {
 }
 
 // VolumeGroup contains a number of volumes.
+//
+//nolint:interfacebloat // VolumeGroup has more than 10 methods, that is ok.
 type VolumeGroup interface {
 	journalledObject
 
@@ -73,6 +75,9 @@ type VolumeGroup interface {
 
 	// ListVolumes returns a slice with all Volumes in the VolumeGroup.
 	ListVolumes(ctx context.Context) ([]Volume, error)
+
+	// ListVolumesInGroup returns a slice with all Volumes part of the VolumeGroup in RBD.
+	ListVolumesInGroup(ctx context.Context) ([]GroupImageInfo, error)
 
 	// CreateSnapshots creates Snapshots of all Volume in the VolumeGroup.
 	// The Snapshots are crash consistent, and created as a consistency
