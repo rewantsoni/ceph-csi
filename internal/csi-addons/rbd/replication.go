@@ -1019,3 +1019,302 @@ func checkVolumeUnpublished(ctx context.Context, nodeId string, rv types.Volume)
 
 	return nil
 }
+
+// GetReplicationDestinationInfo retrieves the destination volume or volume group ID
+// for a replicated volume/group. It maps the source ID to the destination cluster
+// and pool using the replicationDestination configuration from the ConfigMap.
+func (rs *ReplicationServer) GetReplicationDestinationInfo(ctx context.Context,
+	req *replication.GetReplicationDestinationInfoRequest,
+) (*replication.GetReplicationDestinationInfoResponse, error) {
+	// Validate request
+	if req.GetReplicationSource() == nil {
+		return nil, status.Error(codes.InvalidArgument, "replication source is required")
+	}
+
+	// Check type of replication source using type switch
+	switch src := req.GetReplicationSource().GetType().(type) {
+	case *replication.ReplicationSource_Volume:
+		return rs.getVolumeReplicationDestinationInfo(ctx, src.Volume, req.GetSecrets())
+	case *replication.ReplicationSource_Volumegroup:
+		return rs.getVolumeGroupReplicationDestinationInfo(ctx, src.Volumegroup, req.GetSecrets())
+	default:
+		return nil, status.Error(codes.InvalidArgument, "either volume or volumegroup source must be specified")
+	}
+}
+
+// getVolumeReplicationDestinationInfo handles volume replication destination info.
+func (rs *ReplicationServer) getVolumeReplicationDestinationInfo(ctx context.Context,
+	volumeSource *replication.ReplicationSource_VolumeSource, secrets map[string]string,
+) (*replication.GetReplicationDestinationInfoResponse, error) {
+	volumeID := volumeSource.GetVolumeId()
+	if volumeID == "" {
+		return nil, status.Error(codes.InvalidArgument, "empty volume ID in request")
+	}
+
+	if acquired := rs.VolumeLocks.TryAcquire(volumeID); !acquired {
+		log.ErrorLog(ctx, util.VolumeOperationAlreadyExistsFmt, volumeID)
+
+		return nil, status.Errorf(codes.Aborted, util.VolumeOperationAlreadyExistsFmt, volumeID)
+	}
+	defer rs.VolumeLocks.Release(volumeID)
+
+	mgr := rbd.NewManager(rs.driverInstance, nil, secrets)
+	defer mgr.Destroy(ctx)
+
+	// GetVolumeByID handles ClientProfileMapping internally
+	rbdVol, err := mgr.GetVolumeByID(ctx, volumeID)
+	if err != nil {
+		log.ErrorLog(ctx, "failed to get volume with id %q: %v", volumeID, err)
+
+		return nil, getGRPCError(err)
+	}
+
+	// Get destination volume ID
+	destVolumeID, err := getDestinationVolumeID(ctx, rbdVol)
+	if err != nil {
+		log.ErrorLog(ctx, "failed to get destination volume ID: %v", err)
+
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	return &replication.GetReplicationDestinationInfoResponse{
+		ReplicationDestination: &replication.ReplicationDestination{
+			Type: &replication.ReplicationDestination_Volume{
+				Volume: &replication.ReplicationDestination_VolumeDestination{
+					VolumeId: destVolumeID,
+				},
+			},
+		},
+	}, nil
+}
+
+// getVolumeGroupReplicationDestinationInfo handles volume group replication destination info.
+func (rs *ReplicationServer) getVolumeGroupReplicationDestinationInfo(ctx context.Context,
+	volumeGroupSource *replication.ReplicationSource_VolumeGroupSource, secrets map[string]string,
+) (*replication.GetReplicationDestinationInfoResponse, error) {
+	volumeGroupID := volumeGroupSource.GetVolumeGroupId()
+	if volumeGroupID == "" {
+		return nil, status.Error(codes.InvalidArgument, "empty volume group ID in request")
+	}
+
+	if acquired := rs.VolumeLocks.TryAcquire(volumeGroupID); !acquired {
+		log.ErrorLog(ctx, util.VolumeOperationAlreadyExistsFmt, volumeGroupID)
+
+		return nil, status.Errorf(codes.Aborted, util.VolumeOperationAlreadyExistsFmt, volumeGroupID)
+	}
+	defer rs.VolumeLocks.Release(volumeGroupID)
+
+	mgr := rbd.NewManager(rs.driverInstance, nil, secrets)
+	defer mgr.Destroy(ctx)
+
+	// Get volume group
+	volumeGroup, err := mgr.GetVolumeGroupByID(ctx, volumeGroupID)
+	if err != nil {
+		log.ErrorLog(ctx, "failed to get volume group with id %q: %v", volumeGroupID, err)
+
+		return nil, getGRPCError(err)
+	}
+	defer volumeGroup.Destroy(ctx)
+
+	// Get cluster ID and pool name for the group
+	clusterID, err := volumeGroup.GetClusterID(ctx)
+	if err != nil {
+		log.ErrorLog(ctx, "failed to get cluster ID for group %q: %v", volumeGroupID, err)
+
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	poolName, err := volumeGroup.GetPool(ctx)
+	if err != nil {
+		log.ErrorLog(ctx, "failed to get pool for group %q: %v", volumeGroupID, err)
+
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	// Map group ID (same structure as volume ID)
+	srcGroupID, err := volumeGroup.GetID(ctx)
+	if err != nil {
+		log.ErrorLog(ctx, "failed to get group ID: %v", err)
+
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	destGroupID, err := getDestinationIDFromCSIID(ctx, srcGroupID, clusterID, poolName, util.CsiConfigFile)
+	if err != nil {
+		log.ErrorLog(ctx, "failed to get destination group ID: %v", err)
+
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	// Map each volume ID
+	volumes, err := volumeGroup.ListVolumes(ctx)
+	if err != nil {
+		log.ErrorLog(ctx, "failed to get volumes for group %q: %v", volumeGroupID, err)
+
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	volumeIDMappings := make(map[string]string)
+	for _, vol := range volumes {
+		sourceVolID, err := vol.GetID(ctx)
+		if err != nil {
+			log.ErrorLog(ctx, "failed to get ID for volume in group %q: %v", volumeGroupID, err)
+
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+
+		destVolID, err := getDestinationVolumeID(ctx, vol)
+		if err != nil {
+			log.ErrorLog(ctx, "failed to get destination ID for volume %q: %v", sourceVolID, err)
+
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+
+		volumeIDMappings[sourceVolID] = destVolID
+	}
+
+	return &replication.GetReplicationDestinationInfoResponse{
+		ReplicationDestination: &replication.ReplicationDestination{
+			Type: &replication.ReplicationDestination_Volumegroup{
+				Volumegroup: &replication.ReplicationDestination_VolumeGroupDestination{
+					VolumeGroupId: destGroupID,
+					VolumeIds:     volumeIDMappings,
+				},
+			},
+		},
+	}, nil
+}
+
+// getDestinationVolumeID constructs the destination volume ID by mapping
+// the source cluster and pool to the destination cluster and pool.
+func getDestinationVolumeID(ctx context.Context, vol types.Volume) (string, error) {
+	// Get source volume identifiers (already resolved via ClientProfileMapping)
+	clusterID, err := vol.GetClusterID(ctx)
+	if err != nil {
+		return "", status.Error(codes.Internal, err.Error())
+	}
+	poolName, err := vol.GetPool(ctx)
+	if err != nil {
+		return "", status.Error(codes.Internal, err.Error())
+	}
+	srcVolumeID, err := vol.GetID(ctx)
+	if err != nil {
+		return "", status.Error(codes.Internal, err.Error())
+	}
+
+	// Get replication destination configuration
+	destInfo, err := util.GetReplicationDestinationInfo(util.CsiConfigFile, clusterID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get replication destination info for cluster %s: %w", clusterID, err)
+	}
+
+	// If no destination configured, return the same volume ID (assume identical clusters)
+	if destInfo == nil {
+		log.DebugLog(ctx, "no replication destination configured for cluster %s, assuming same volume ID", clusterID)
+
+		return srcVolumeID, nil
+	}
+
+	// Decompose the source volume ID to get pool ID
+	var sourceID util.CSIIdentifier
+	if err := sourceID.DecomposeCSIID(srcVolumeID); err != nil {
+		return "", fmt.Errorf("failed to decompose source volume ID: %w", err)
+	}
+
+	remoteClusterID := destInfo.RemoteClusterID
+	if remoteClusterID == "" {
+		return "", errors.New("remote cluster ID is empty in replication destination config")
+	}
+
+	// Determine remote pool ID
+	remotePoolID := sourceID.LocationID
+	if destInfo.RBD != nil && destInfo.RBD.RemotePoolMapping != nil {
+		if remotePoolDetails, exists := destInfo.RBD.RemotePoolMapping[poolName]; exists {
+			// Parse the remote pool ID from string to int64
+			parsedPoolID, err := strconv.ParseInt(remotePoolDetails.PoolID, 10, 64)
+			if err != nil {
+				return "", err
+			}
+			remotePoolID = parsedPoolID
+			log.DebugLog(ctx, "mapped pool %s from ID %d to remote ID %d", poolName, sourceID.LocationID, remotePoolID)
+		} else {
+			log.DebugLog(ctx, "no mapping found for pool %s, using same pool ID %d", poolName, sourceID.LocationID)
+		}
+	}
+
+	// Compose destination volume ID
+	destID := util.CSIIdentifier{
+		ClusterID:  remoteClusterID,
+		LocationID: remotePoolID,
+		ObjectUUID: sourceID.ObjectUUID,
+	}
+
+	destVolumeID, err := destID.ComposeCSIID()
+	if err != nil {
+		return "", fmt.Errorf("failed to compose destination volume ID: %w", err)
+	}
+
+	log.UsefulLog(ctx, "mapped source volume %s to destination volume %s", srcVolumeID, destVolumeID)
+
+	return destVolumeID, nil
+}
+
+// getDestinationIDFromCSIID is a helper function to map a CSI ID (volume or group)
+// to its destination ID using cluster and pool information.
+func getDestinationIDFromCSIID(ctx context.Context, srcID, clusterID, poolName, configFile string) (string, error) {
+	// Decompose the source ID
+	var sourceID util.CSIIdentifier
+	if err := sourceID.DecomposeCSIID(srcID); err != nil {
+		return "", fmt.Errorf("failed to decompose source ID: %w", err)
+	}
+
+	// Get replication destination configuration
+	destInfo, err := util.GetReplicationDestinationInfo(configFile, clusterID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get replication destination info for cluster %s: %w", clusterID, err)
+	}
+
+	// If no destination configured, return the same ID
+	if destInfo == nil {
+		log.DebugLog(ctx, "no replication destination configured for cluster %s, assuming same ID", clusterID)
+
+		return srcID, nil
+	}
+
+	remoteClusterID := destInfo.RemoteClusterID
+	if remoteClusterID == "" {
+		return "", errors.New("remote cluster ID is empty in replication destination config")
+	}
+
+	// Determine remote pool ID
+	remotePoolID := sourceID.LocationID
+	if destInfo.RBD != nil && destInfo.RBD.RemotePoolMapping != nil {
+		if remotePoolDetails, exists := destInfo.RBD.RemotePoolMapping[poolName]; exists {
+			// Parse the remote pool ID from string to int64
+			parsedPoolID, err := strconv.ParseInt(remotePoolDetails.PoolID, 10, 64)
+			if err != nil {
+				return "", err
+			}
+			remotePoolID = parsedPoolID
+			log.DebugLog(ctx, "mapped pool %s from ID %d to remote ID %d", poolName, sourceID.LocationID, remotePoolID)
+		} else {
+			log.DebugLog(ctx, "no mapping found for pool %s, using same pool ID %d", poolName, sourceID.LocationID)
+		}
+	}
+
+	// Compose destination ID
+	destID := util.CSIIdentifier{
+		ClusterID:  remoteClusterID,
+		LocationID: remotePoolID,
+		ObjectUUID: sourceID.ObjectUUID,
+	}
+
+	destCSIID, err := destID.ComposeCSIID()
+	if err != nil {
+		return "", fmt.Errorf("failed to compose destination ID: %w", err)
+	}
+
+	log.UsefulLog(ctx, "mapped source ID %s to destination ID %s", srcID, destCSIID)
+
+	return destCSIID, nil
+}
